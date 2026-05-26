@@ -36,6 +36,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - [测试] 收敛 #1391 Phase 3 后端/API 与 Web 回归检查：`./scripts/ci_gate.sh`、`test_pipeline_market_phase_context.py`、`test_analysis_api_contract.py`、`test_analysis_history.py`、`npm run lint`、`npm run build`。
 - [新功能] 新增 AnalysisContextPack P1 内部契约与脱敏序列化测试。
 - [修复] 恢复 Agent/历史兼容快照中的关联板块与板块联动字段提取，修复新版首页报告缺少“板块联动”的回归问题。
+- [改进] 设置页配置帮助阶段性补齐 Web 设置页实际展示/可配置字段的中英双语文案，覆盖 Agent、回测、报告、通知路由、系统运行时、AI legacy、数据源和通知高级配置。
+- [修复] 修正 Web 设置帮助中 legacy 告警 JSON 字段名与静默时段投递语义说明。
 - [修复] 修复 Web 中文设置页在数据源、通知、系统与 Agent 区域的配置标题、说明和关键下拉选项漏翻问题。
 - [修复] 修复问股会话切换和首页任务重连后可能残留 Agent/分析任务进行中状态的问题。
 - [新功能] 问股新增默认关闭的可见对话上下文压缩，支持 Web 开关、Agent 高级 preset、滚动摘要和最近轮次原文保护，降低长会话 token 消耗。
