@@ -514,6 +514,21 @@ jobs:
             python main.py $FORCE_RUN_ARG
           fi
       
+      
+      - name: 执行市场深度扫描
+        if: always()
+        env:
+          ANSPIRE_API_KEYS: ${{ secrets.ANSPIRE_API_KEYS }}
+        run: |
+          echo "📊 运行市场深度扫描..."
+          python scripts/market_scanner.py -o reports/market_scan.md 2>&1 || echo "⚠️ 市场扫描失败，继续"
+          # 把扫描报告追加到主日报后面
+          if [ -f reports/market_scan.md ] && [ -f reports/report_$(TZ='Asia/Shanghai' date +%Y%m%d).md ]; then
+            echo "" >> reports/report_$(TZ='Asia/Shanghai' date +%Y%m%d).md
+            echo "---" >> reports/report_$(TZ='Asia/Shanghai' date +%Y%m%d).md
+            cat reports/market_scan.md >> reports/report_$(TZ='Asia/Shanghai' date +%Y%m%d).md
+            echo "✅ 市场扫描已追加到主日报"
+          fi
       - name: 上传分析报告
         uses: actions/upload-artifact@v6
         if: always()
