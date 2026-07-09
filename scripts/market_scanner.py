@@ -32,9 +32,13 @@ from typing import Any, Dict, List, Optional, Tuple
 import pandas as pd
 
 # ---- Path setup: ensure we can import from the project root ----
-_PROJECT_ROOT = Path(__file__).resolve().parent
+_PROJECT_ROOT = Path(__file__).resolve().parent.parent  # scripts/ → repo root
 if str(_PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(_PROJECT_ROOT))
+# Also add scripts/ itself for direct imports
+_SCRIPTS_DIR = Path(__file__).resolve().parent
+if str(_SCRIPTS_DIR) not in sys.path:
+    sys.path.insert(0, str(_SCRIPTS_DIR))
 
 # ---- Logger ----
 logging.basicConfig(
@@ -187,31 +191,57 @@ def fetch_individual_fund_flow() -> pd.DataFrame:
 def fetch_stock_kline(symbol: str, days: int = 10) -> pd.DataFrame:
     """
     获取个股近期日K线数据，用于缩量洗筹检测。
+    优先用 akshare，失败后降级到 yfinance。
 
     symbol: 纯数字代码如 '000063'
     """
     import akshare as ak
+    import time
 
-    # Determine market code
     code = symbol.strip()
-    if code.startswith(("0", "3")):
-        full_code = f"sz{code}" if code.startswith(("0", "3")) else f"sh{code}"
-    else:
-        full_code = f"sh{code}"
 
-    def _fetch():
-        end_date = datetime.now().strftime("%Y%m%d")
-        start_date = (datetime.now() - timedelta(days=days + 15)).strftime("%Y%m%d")
-        df = ak.stock_zh_a_hist(
-            symbol=code, period="daily",
-            start_date=start_date, end_date=end_date, adjust="qfq"
-        )
-        if df is None or df.empty:
-            raise ValueError(f"No kline data for {code}")
-        return df.tail(days)
+    # --- Method 1: AkShare (East Money) ---
+    for attempt in range(2):
+        try:
+            end_date = datetime.now().strftime("%Y%m%d")
+            start_date = (datetime.now() - timedelta(days=days + 15)).strftime("%Y%m%d")
+            df = ak.stock_zh_a_hist(
+                symbol=code, period="daily",
+                start_date=start_date, end_date=end_date, adjust="qfq"
+            )
+            if df is not None and not df.empty:
+                return df.tail(days)
+        except Exception:
+            if attempt < 1:
+                time.sleep(1)
 
-    df = _retry(_fetch, max_retries=2, label=f"kline({code})")
-    return df
+    # --- Method 2: yfinance fallback ---
+    try:
+        import yfinance as yf
+
+        # Map A-share code to yfinance ticker
+        if code.startswith(("6", "9")):
+            ticker = f"{code}.SS"
+        elif code.startswith(("0", "3")):
+            ticker = f"{code}.SZ"
+        else:
+            ticker = f"{code}.SS"
+
+        t = yf.Ticker(ticker)
+        df = t.history(period=f"{days + 10}d")
+        if df is not None and not df.empty and len(df) > 1:
+            # Normalize columns to match akshare format
+            df = df.reset_index()
+            df = df.rename(columns={
+                "Date": "日期", "Open": "开盘", "High": "最高",
+                "Low": "最低", "Close": "收盘", "Volume": "成交量",
+            })
+            df["涨跌幅"] = df["收盘"].pct_change() * 100
+            return df.tail(days)
+    except Exception as e:
+        logger.debug("yfinance fallback also failed for %s: %s", code, e)
+
+    raise ValueError(f"All kline sources failed for {code}")
 
 
 # ============================================================
@@ -784,54 +814,56 @@ def build_report(
 
 def send_email_report(report_md: str, subject: str = None) -> bool:
     """
-    Send report via the project's email sender.
-    Falls back to standalone SMTP if project import fails.
+    Send report via SMTP standalone (no dependency on project src module).
+    Uses EMAIL_SENDER, EMAIL_PASSWORD, EMAIL_RECEIVERS from env/os.environ.
     """
+    import smtplib
+    from email.mime.text import MIMEText
+
     if subject is None:
         subject = f"📊 A股市场深度扫描日报 - {datetime.now().strftime('%Y-%m-%d')}"
 
-    # --- Try project's email sender first ---
+    sender = os.getenv("EMAIL_SENDER", "").strip()
+    password = os.getenv("EMAIL_PASSWORD", "").strip()
+    receivers = os.getenv("EMAIL_RECEIVERS", "").strip()
+
+    if not sender or not password:
+        logger.warning("邮件配置不完整: EMAIL_SENDER=%s EMAIL_PASSWORD=%s", bool(sender), bool(password))
+        return False
+    if not receivers:
+        receivers = sender
+        logger.info("EMAIL_RECEIVERS 为空，使用发件人地址作为收件人")
+
+    # --- SMTP server auto-detect ---
+    domain = sender.split("@")[-1].lower() if "@" in sender else "qq.com"
+    SMTP_CONFIG = {
+        "qq.com": ("smtp.qq.com", 465),
+        "foxmail.com": ("smtp.qq.com", 465),
+        "163.com": ("smtp.163.com", 465),
+        "126.com": ("smtp.126.com", 465),
+        "gmail.com": ("smtp.gmail.com", 587),
+        "outlook.com": ("smtp-mail.outlook.com", 587),
+        "hotmail.com": ("smtp-mail.outlook.com", 587),
+    }
+    smtp_server, smtp_port = SMTP_CONFIG.get(domain, ("smtp.qq.com", 465))
+
     try:
-        from src.config import get_config
-        from src.notification_sender.email_sender import EmailSender
+        msg = MIMEText(report_md, "plain", "utf-8")
+        msg["Subject"] = subject
+        msg["From"] = sender
+        msg["To"] = receivers
 
-        config = get_config()
-        if config.email_sender and config.email_password:
-            sender = EmailSender(config)
-            # Use the email sender's internal method
-            from email.mime.text import MIMEText
-            import smtplib
-
-            msg = MIMEText(report_md, "plain", "utf-8")
-            msg["Subject"] = subject
-            msg["From"] = config.email_sender
-            msg["To"] = config.email_receivers or config.email_sender
-
-            # Determine SMTP server
-            domain = config.email_sender.split("@")[-1].lower()
-            smtp_configs = {
-                "qq.com": ("smtp.qq.com", 465, True),
-                "163.com": ("smtp.163.com", 465, True),
-                "gmail.com": ("smtp.gmail.com", 587, False),
-            }
-            smtp_server, smtp_port, use_ssl = smtp_configs.get(
-                domain, ("smtp.qq.com", 465, True)
-            )
-
-            if use_ssl:
-                server = smtplib.SMTP_SSL(smtp_server, smtp_port, timeout=30)
-            else:
-                server = smtplib.SMTP(smtp_server, smtp_port, timeout=30)
-                server.starttls()
-
-            server.login(config.email_sender, config.email_password)
-            server.sendmail(config.email_sender, [config.email_receivers or config.email_sender], msg.as_string())
-            server.quit()
-            logger.info("✅ 邮件发送成功 → %s", config.email_receivers or config.email_sender)
-            return True
+        if smtp_port == 465:
+            server = smtplib.SMTP_SSL(smtp_server, smtp_port, timeout=30)
         else:
-            logger.warning("邮件配置不完整，跳过发送")
-            return False
+            server = smtplib.SMTP(smtp_server, smtp_port, timeout=30)
+            server.starttls()
+
+        server.login(sender, password)
+        server.sendmail(sender, receivers.split(","), msg.as_string())
+        server.quit()
+        logger.info("✅ 邮件发送成功 → %s", receivers)
+        return True
     except Exception as e:
         logger.error("邮件发送失败: %s", e)
         return False
