@@ -46,6 +46,7 @@ jobs:
           EMAIL_RECEIVERS: ${{ secrets.EMAIL_RECEIVERS }}
         run: python scripts/send_email.py
 
+      - name: 上传报告
         uses: actions/upload-artifact@v6
         if: always()
         with:
