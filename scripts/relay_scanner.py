@@ -474,217 +474,203 @@ def llm_deep_analysis(
 def build_report(
     sentiment: dict, ladder_data: dict, candidates: List[Dict], llm_text: str = None
 ) -> str:
-    """生成完整接力分析报告"""
+    """生成完整接力分析报告 — 对齐决策仪表盘风格"""
     now = datetime.now().strftime("%Y-%m-%d %H:%M")
-    sep = "\n\n---\n\n"
+    trade_date = ladder_data.get('data_date', '')
+    sep = "\n\n"
+
+    # ----- Top candidates for highlights -----
+    high = [c for c in candidates if c["promo_prob"] >= 55]
+    mid = [c for c in candidates if 40 <= c["promo_prob"] < 55]
+    total_zt = ladder_data.get("total_zt", 0)
+
+    # Emoji summary line
+    parts = []
+    if high: parts.append(f"🔥高概率:{len(high)}")
+    if mid:  parts.append(f"🟡中等:{len(mid)}")
+    parts.append(f"📋总涨停:{total_zt}")
+    summary_line = " | ".join(parts)
 
     lines = [
-        "# 🎯 短线接力环境 & 连板晋级分析",
-        f"**{ladder_data.get('data_date', '')} 盘后复盘** | 生成: {now}",
+        f"🎯 {trade_date} 短线接力决策仪表盘",
+        f"共{len(candidates)}只连板候选 | {sentiment['cycle']} | {summary_line}",
+        "",
+        "=" * 60,
         "",
     ]
 
-    # ===== 1. 情绪环境 =====
+    # ===== 1. 情绪环境 (compact, card-style) =====
+    s = sentiment
+    cycle_icon = {"🔥 高潮期":"🟢", "🌤️ 发酵期":"🟢", "🌥️ 分歧期":"🟡", "🌧️ 退潮期":"🟠", "⛈️ 冰点期":"🔴"}
+    icon = cycle_icon.get(s['cycle'], '⚪')
+
     lines += [
-        sep,
-        "## 📊 一、情绪环境评估",
+        f"📊 接力环境评估",
+        f"{'─' * 40}",
+        f"💭 情绪周期: {icon} {s['cycle']}",
+        f"📈 赚钱效应: {s['sentiment']:.0f}/100 | 涨停{s.get('limit_up',0)}家 / 跌停{s.get('limit_down',0)}家",
+        f"💥 炸板率: {s['fry_rate']:.1f}% | 连板晋级率: {s['promo_rate']:.0f}%",
+        f"🏔️ 最高连板: {s['max_streak']}板 | 仓位安全: {s['safety']}",
+        f"",
+        f"📝 环境解读: {s['cycle_detail']}",
         "",
-        f"| 指标 | 数值 | 状态 |",
-        f"|------|------|------|",
-        f"| 赚钱效应 | {sentiment['sentiment']:.0f}/100 | {sentiment['cycle']} |",
-        f"| 涨跌结构 | {sentiment.get('limit_up',0)}涨停 / {sentiment.get('limit_down',0)}跌停 | — |",
-        f"| 炸板率 | {sentiment['fry_rate']:.1f}% | {'⚠️偏高' if sentiment['fry_rate']>30 else '✅正常'} |",
-        f"| 连板晋级率 | {sentiment['promo_rate']:.0f}% | {'✅健康' if sentiment['promo_rate']>25 else '⚠️偏低'} |",
-        f"| 最高连板 | {sentiment['max_streak']}板 | {'🔥空间打开' if sentiment['max_streak']>=5 else '📈空间有限'} |",
-        f"| **仓位建议** | **{sentiment['position']}** | **{sentiment['safety']}** |",
-        "",
-        f"> {sentiment['cycle_detail']}",
     ]
 
-    # ===== 2. 连板梯队 =====
+    # ===== 2. 连板梯队 (visual ladder) =====
+    sd = ladder_data.get("shenwei_dragon", {})
+    levels = ladder_data.get("levels", {})
+
     lines += [
-        sep,
-        "## 🪜 二、连板梯队梳理",
-        "",
+        f"{'─' * 60}",
+        f"🪜 连板梯队",
+        f"{'─' * 40}",
     ]
 
     # 身位龙
-    sd = ladder_data.get("shenwei_dragon", {})
     if sd and sd.get("name"):
-        lines += [
-            f"### 👑 身位龙（市场总龙头）",
-            f"**{sd.get('name', '')}** — {sd.get('boards', '?')}连板 | "
-            f"板块: {sd.get('industry', '')} | "
-            f"辨识度: ⭐⭐⭐⭐⭐",
-            "",
-            "> 全市场最高连板，情绪风向标，不一定要买但必须盯。",
-            "",
-        ]
+        lines.append(f"👑 身位龙: {sd.get('name','')}  {sd.get('boards','?')}连板 | {sd.get('industry','')} | 辨识度⭐⭐⭐⭐⭐")
 
     # 板块龙
     sdragons = ladder_data.get("sector_dragons", [])
     if sdragons:
-        lines += ["### 🏆 板块龙头", ""]
-        lines += ["| 主线题材 | 板块龙 | 涨停家数 | 龙头定位 |", "|------|------|:---:|------|"]
-        for ts in ladder_data.get("theme_stats", [])[:8]:
-            name = ts["name"]
-            sd_match = [d for d in sdragons if d["theme"] == name]
-            leader = sd_match[0]["leader"] if sd_match else "—"
-            zt_n = ts["zt_count"]
-            role = "身位龙" if leader == sd.get("name", "") else ("板块龙头" if leader != "—" else "—")
-            lines.append(f"| {name} | {leader} | {zt_n} | {role} |")
-        lines.append("")
+        lines.append(f"")
+        lines.append(f"🏆 板块龙头:")
+        for ts in ladder_data.get("theme_stats", [])[:6]:
+            leader_name = "—"
+            for d in sdragons:
+                if d["theme"] == ts["name"]:
+                    leader_name = d["leader"]
+                    break
+            tag = " [身位龙]" if leader_name == sd.get("name","") else ""
+            lines.append(f"   {ts['name']}: {leader_name}{tag}  ({ts['zt_count']}家涨停)")
 
-    # 梯队完整度
-    levels = ladder_data.get("levels", {})
+    # 梯队
     if levels:
-        lines += ["### 📋 涨停板梯队", ""]
-        sorted_keys = sorted(levels.keys(), key=lambda x: int(x) if x.isdigit() else 99)
-        for lv in sorted_keys:
+        lines.append(f"")
+        lines.append(f"📋 涨停梯队:")
+        for lv in sorted(levels.keys(), key=lambda x: int(x) if x.isdigit() else 99):
             stocks = levels[lv]
-            stock_strs = []
-            for s in stocks[:12]:
-                sn = s.get("name", "")
-                sc = s.get("code", "")
-                si = s.get("industry", "")
-                stock_strs.append(f"{sn}({sc})")
-            stock_line = " → ".join(stock_strs) if stock_strs else "—"
-            if lv == "1":
-                lines.append(f"**首板** ({len(stocks)}只): {stock_line}")
-            else:
-                lines.append(f"**{lv}板** ({len(stocks)}只): {stock_line}")
-            lines.append("")
+            names = [f"{s.get('name','')}({s.get('code','')})" for s in stocks[:8]]
+            suffix = f" ...+{len(stocks)-8}" if len(stocks) > 8 else ""
+            label = f"{lv}板" if lv != "1" else "首板"
+            lines.append(f"   {label} ({len(stocks)}家): {' → '.join(names)}{suffix}")
 
-    # ===== 3. 晋级筛选 =====
-    lines += [
-        sep,
-        "## 🎯 三、连板晋级候选（按概率排序）",
-        "",
-    ]
+    lines.append("")
 
-    high_prob = [c for c in candidates if c["promo_prob"] >= 55]
-    mid_prob = [c for c in candidates if 40 <= c["promo_prob"] < 55]
-    low_prob = [c for c in candidates if c["promo_prob"] < 40]
-
-    if high_prob:
-        lines += ["### 🔥 高概率晋级 (≥55%)", ""]
-        lines += [
-            "| # | 股票 | 连板 | 封板 | 换手 | 板块支撑 | 封板质量 | 筹码 | 辨识度 | 资金 | 概率 | 介入 | 止损 |",
-            "|---|------|:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|------|------|",
-        ]
-        for i, c in enumerate(high_prob[:15]):
-            s = c["scores"]
-            lines.append(
-                f"| {i+1} | **{c['name']}**({c['code']}) | {c['streak']}板 | "
-                f"{c['first_seal']} | {c['turnover']:.1f}% | "
-                f"{s['板块支撑']} | {s['封板质量']} | {s['筹码健康度']} | "
-                f"{s['辨识度/梯队']} | {s['资金/龙虎榜']} | "
-                f"**{c['promo_prob']:.0f}%** | {c['method']} | {c['stop_loss']} |"
-            )
-
-    if mid_prob:
-        lines += ["", "### 🟡 中等概率晋级 (40-55%)", ""]
-        lines += [
-            "| # | 股票 | 连板 | 封板 | 换手 | 概率 | 竞价标准 | 介入 | 止损 |",
-            "|---|------|:---:|:---:|:---:|:---:|------|------|------|",
-        ]
-        for i, c in enumerate(mid_prob[:15]):
-            lines.append(
-                f"| {i+1} | {c['name']}({c['code']}) | {c['streak']}板 | "
-                f"{c['first_seal']} | {c['turnover']:.1f}% | "
-                f"{c['promo_prob']:.0f}% | {c['auction']} | {c['method']} | {c['stop_loss']} |"
-            )
-
-    if not high_prob and not mid_prob:
-        lines.append("> 今日连板股较少，无高概率晋级标的。建议等待下一个情绪周期。")
-
-    # ===== 4. 每日精选 =====
-    lines += [
-        sep,
-        "## ⭐ 四、每日精选（Top 5 详细分析）",
-        "",
-    ]
-    for i, c in enumerate(candidates[:5]):
-        role_tags = []
-        if c["is_shenwei"]:
-            role_tags.append("👑身位龙")
-        if c["is_sector_dragon"]:
-            role_tags.append("🏆板块龙")
-        if c["streak"] >= 3:
-            role_tags.append(f"📈{c['streak']}板高标")
-        if c["streak"] == 2:
-            role_tags.append("🔄补涨龙")
-        role_str = " ".join(role_tags) if role_tags else "连板股"
-
-        s = c["scores"]
-        themes_str = "/".join(c["themes"][:3]) if c["themes"] else "无主线"
-
-        lines += [
-            f"### {i+1}. {role_str} — **{c['name']}**({c['code']})",
-            "",
-            f"| 维度 | 详情 |",
-            f"|------|------|",
-            f"| 连板/封板 | {c['streak']}连板，首封{c['first_seal']}，{'未开板' if c['break_n']==0 else '开板' + str(c['break_n']) + '次'} |",
-            f"| 换手/量能 | 换手{c['turnover']:.1f}%，{'✅健康' if 3<=c['turnover']<=15 else '⚠️关注'} |",
-            f"| **板块支撑** | {themes_str} — 得分{s['板块支撑']}/25 |",
-            f"| **封板质量** | 得分{s['封板质量']}/25 —— {'封单强劲，早盘秒封' if s['封板质量']>=20 else '封板质量中等' if s['封板质量']>=12 else '封板偏弱，谨慎'} |",
-            f"| **筹码健康度** | 得分{s['筹码健康度']}/20 —— 流通市值{c['float_mv']:.0f}亿 |",
-            f"| **辨识度/梯队** | 得分{s['辨识度/梯队']}/15 —— {role_str} |",
-            f"| **资金/龙虎榜** | 得分{s['资金/龙虎榜']}/15 |",
-            f"| **晋级概率** | **{c['promo_prob']:.0f}%** |",
-            f"| **竞价标准** | {c['auction']} |",
-            f"| **介入方式** | {c['method']} |",
-            f"| **止损位** | {c['stop_loss']} |",
-            f"| **核心逻辑** | {themes_str}主线共振 + {'身位优势' if c['is_shenwei'] else '板块龙头' if c['is_sector_dragon'] else '补涨潜力'} + {'封板质量优秀' if s['封板质量']>=20 else '封板质量尚可'} |",
-            f"| **风险点** | {'明日面临' + str(c['streak']+1) + '板考验，需确认竞价强度' if c['streak']>=3 else '板块能否持续发酵是核心变量'} |",
-            "",
-        ]
-
-    # ===== 5. LLM分析 =====
+    # ===== 3. AI研判 =====
     if llm_text:
         lines += [
-            sep,
-            "## 🧠 五、AI综合研判",
-            "",
+            f"{'─' * 60}",
+            f"🧠 AI综合研判",
+            f"{'─' * 40}",
             llm_text,
+            "",
         ]
+
+    # ===== 4. 晋级精选 (card style per stock, max 8) =====
+    top_picks = (high + mid)[:8]
+    if top_picks:
+        lines += [
+            f"{'─' * 60}",
+            f"🎯 晋级精选标的",
+            f"{'─' * 40}",
+            "",
+        ]
+
+        for i, c in enumerate(top_picks):
+            s = c["scores"]
+            themes_str = "/".join(c["themes"][:2]) if c["themes"] else "无主线"
+
+            # Role tag
+            role_tag = ""
+            if c["is_shenwei"]:
+                role_tag = " 👑身位龙"
+            elif c["is_sector_dragon"]:
+                role_tag = " 🏆板块龙"
+            elif c["streak"] >= 3:
+                role_tag = f" 📈{c['streak']}板高标"
+            elif c["streak"] == 2:
+                role_tag = " 🔄补涨龙"
+
+            # Probability emoji
+            prob = c["promo_prob"]
+            prob_icon = "🟢" if prob >= 55 else ("🟡" if prob >= 40 else "🟠")
+
+            seal_quality = "极强" if s['封板质量'] >= 20 else ("较强" if s['封板质量'] >= 12 else "一般")
+            chip_quality = "健康" if s['筹码健康度'] >= 14 else "一般"
+
+            lines += [
+                f"{'─' * 40}",
+                f"{prob_icon} {c['name']} ({c['code']}){role_tag}",
+                f"",
+                f"📊 晋级概率: **{prob:.0f}%** | 评分: {c['total_score']:.0f}/100",
+                f"📰 连板/封板: {c['streak']}连板 | 首封{c['first_seal']} | {'未开板' if c['break_n']==0 else '开板'+str(c['break_n'])+'次'} | 换手{c['turnover']:.1f}%",
+                f"💭 板块支撑: {themes_str} | 封板质量:{seal_quality} | 筹码:{chip_quality} | 市值{c['float_mv']:.0f}亿",
+                f"",
+                f"✨ 核心逻辑: {themes_str}主线共振 + {'身位优势，全市场最高标' if c['is_shenwei'] else '板块龙头地位稳固' if c['is_sector_dragon'] else '补涨潜力充足'} + 封板质量{seal_quality}",
+                f"",
+                f"🚨 风险点: {'需确认竞价强度，面临' + str(c['streak']+1) + '板分歧考验' if c['streak']>=3 else '板块持续性需观察，关注龙头走势'}",
+                f"",
+                f"📋 操盘预案:",
+                f"   竞价标准: {c['auction']}",
+                f"   介入方式: {c['method']}",
+                f"   止损位:   {c['stop_loss']}",
+                f"",
+            ]
+
+    # ===== 5. 其余连板候选 (compact table) =====
+    rest = [c for c in candidates if c not in top_picks]
+    if rest:
+        lines += [
+            f"{'─' * 60}",
+            f"📋 其余连板候选 ({len(rest)}只)",
+            f"{'─' * 40}",
+            "",
+            f"| 股票 | 连板 | 封板 | 换手 | 概率 | 评级 | 介入 |",
+            f"|------|:---:|:---:|:---:|:---:|:---:|------|",
+        ]
+        for c in rest[:20]:
+            lines.append(
+                f"| {c['name']}({c['code']}) | {c['streak']}板 | {c['first_seal']} | "
+                f"{c['turnover']:.1f}% | {c['promo_prob']:.0f}% | "
+                f"{'A' if c['promo_prob']>=55 else 'B' if c['promo_prob']>=40 else 'C'} | "
+                f"{c['method']} |"
+            )
+        lines.append("")
 
     # ===== 6. 操作纪律 =====
     lines += [
-        sep,
-        "## 📋 六、明日操作纪律",
-        "",
-        "### 竞价观察清单",
-        "- ✅ 高概率标的竞价是否高开在标准区间内",
-        "- ✅ 竞价量能是否达标（>昨日成交量10%）",
-        "- ✅ 板块其他涨停股竞价表现（判断板块持续性）",
-        "- ✅ 市场整体竞价情绪（涨跌比、炸板率预期）",
-        "",
-        "### 放弃信号（任一触发即放弃接力）",
-        "- ❌ 竞价大幅低开（>3%）或高开后快速跳水",
-        "- ❌ 竞价量能严重萎缩（<昨日5%）",
-        "- ❌ 开盘5分钟内未封板或开板超过2次",
-        "- ❌ 板块龙头集体走弱",
-        "- ❌ 大盘低开超过1%且无反弹迹象",
-        "",
-        "### 仓位纪律",
-        f"- 📊 当前仓位建议: **{sentiment['position']}**",
-        "- 🚫 单票上限不超过总仓位20%",
-        "- 🛑 日内止损无条件执行，不扛单",
-        "- 📝 盘后复盘每笔交易，记录买入理由与实际走势偏差",
+        f"{'─' * 60}",
+        f"📋 明日操作纪律",
+        f"{'─' * 40}",
+        f"",
+        f"📊 仓位建议: **{sentiment['position']}** | 单票上限: 总仓位20%",
+        f"",
+        f"✅ 竞价关注:",
+        f"   1. 精选标的竞价是否高开在标准区间",
+        f"   2. 竞价量能是否达标 (>昨日成交量10%)",
+        f"   3. 板块其他涨停股竞价表现",
+        f"   4. 市场整体竞价情绪 (涨跌比)",
+        f"",
+        f"❌ 放弃信号:",
+        f"   1. 竞价大幅低开 (>3%) 或高开后快速跳水",
+        f"   2. 竞价量能严重萎缩 (<昨日5%)",
+        f"   3. 开盘5分钟内未封板或开板超2次",
+        f"   4. 板块龙头集体走弱",
+        f"   5. 大盘低开超1%且无反弹迹象",
+        f"",
+        f"🛑 纪律铁律: 日内止损无条件执行，不扛单，不侥幸",
+        f"📝 盘后复盘每笔交易，记录买入理由与实际走势偏差",
     ]
 
-    # ===== 免责 =====
+    # ===== 7. Disclaimer =====
     lines += [
-        sep,
-        "## ⚠️ 免责声明",
         "",
-        "> 本报告基于公开市场数据和AI量化模型自动生成，",
-        "> **所有分析结论仅供参考，不构成任何投资建议。**",
-        "> 短线接力风险极高，请结合自身风险承受能力独立判断。",
-        "> 历史表现不代表未来收益，市场有风险，投资需谨慎。",
-        "",
-        f"*Generated by DSA Relay Analyzer v3 @ {now}*",
+        f"{'─' * 60}",
+        f"⚠️ 免责声明: 本报告基于公开数据和AI模型生成，仅供研究参考，不构成投资建议。",
+        f"   短线接力风险极高，请结合自身情况独立判断。",
+        f"",
+        f"生成时间: {now}",
     ]
 
     return "\n".join(lines)
