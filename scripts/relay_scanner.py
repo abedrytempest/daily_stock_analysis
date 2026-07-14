@@ -158,35 +158,77 @@ def calc_sentiment_cycle(snapshot: dict, zt_pool: list) -> dict:
 # ====================================================================
 
 def analyze_ladder(snapshot: dict) -> dict:
-    """梳理连板梯队：身位龙/板块龙/补涨龙"""
+    """梳理连板梯队：身位龙/板块龙/补涨龙 — 多源交叉验证"""
     ladder = snapshot.get("ladder", {})
+    ladder_detail = snapshot.get("ladder_detail", {})
     themes = snapshot.get("hot_themes", [])
+    hotmoney = snapshot.get("hotmoney", {})
     data_date = snapshot.get("date", "")
 
-    boards_data = ladder.get("boards", {})
+    # ---- Ladder from ladder_detail.levels (primary source) ----
+    raw_levels = ladder_detail.get("levels", [])
+    lb_rates = ladder_detail.get("lb_rates_map", {})
+    concept_counts = ladder_detail.get("concept_counts", {})
+
+    # Build levels dict: board_count → {success: [...], failed: [...]}
+    levels_data = {}
+    for lv in raw_levels:
+        board_n = lv.get("boards", 0)
+        success_stocks = [s for s in lv.get("stocks", []) if s.get("is_success")]
+        fail_stocks = [s for s in lv.get("stocks", []) if not s.get("is_success")]
+        levels_data[str(board_n)] = {
+            "stocks": lv.get("stocks", []),
+            "success": success_stocks,
+            "failed": fail_stocks,
+            "total": lv.get("count", 0) + lv.get("fail_count", 0),
+            "success_count": lv.get("count", 0),
+            "fail_count": lv.get("fail_count", 0),
+        }
+
+    # ---- Shenwei dragon (market top) ----
     top_streak = ladder.get("top_streak", {})
+    shenwei_dragon = {
+        "name": top_streak.get("name", ""),
+        "boards": top_streak.get("boards", 0),
+        "industry": top_streak.get("industry", ""),
+    }
 
-    # Parse board levels from ladder
-    levels = {}
-    for key, stocks in boards_data.items():
-        if key.startswith("board_") and isinstance(stocks, list):
-            level = key.replace("board_", "")
-            levels[level] = stocks
-
-    # Theme → top stocks mapping
-    theme_leaders = {}
+    # ---- Sector dragons & theme mapping ----
+    # Build stock→themes mapping from hot_themes[].stocks[]
+    stock_themes_map = {}  # clean_code → [theme_names]
+    theme_stock_codes = {}  # theme_name → {clean_codes}
     for t in themes:
-        name = t.get("name", "")
+        t_name = t["name"]
+        theme_stock_codes[t_name] = set()
+        for s in t.get("stocks", []):
+            raw_code = s.get("code", "")
+            clean_code = raw_code.replace(".SZ", "").replace(".SH", "").replace(".BJ", "").replace(".N", "")
+            if clean_code:
+                theme_stock_codes[t_name].add(clean_code)
+                if clean_code not in stock_themes_map:
+                    stock_themes_map[clean_code] = []
+                stock_themes_map[clean_code].append(t_name)
+
+    # Sector dragons = top_stocks from each theme (if different from shenwei dragon)
+    sector_dragons = []
+    for t in themes:
         tops = t.get("top_stocks", [])
         if tops:
-            theme_leaders[name] = tops[0].get("name", "")
+            leader_name = tops[0].get("name", "")
+            if leader_name != shenwei_dragon.get("name", ""):
+                sector_dragons.append({"theme": t["name"], "leader": leader_name})
 
-    # Identify roles
-    shenwei_dragon = top_streak  # 市场最高板 = 身位龙
-    sector_dragons = []  # 板块龙
-    for theme_name, leader_name in theme_leaders.items():
-        if leader_name != shenwei_dragon.get("name", ""):
-            sector_dragons.append({"theme": theme_name, "leader": leader_name})
+    # ---- Hot money / Dragon-Tiger Board ----
+    hotmoney_top_buy = hotmoney.get("top_net_buy", [])
+    hotmoney_seats = hotmoney.get("seats", [])
+
+    # Build seat → stocks mapping
+    seat_map = {}
+    for seat in hotmoney_seats:
+        seat_name = seat.get("name", "")
+        seat_stocks = [s.get("name", "") for s in seat.get("stocks", [])]
+        if seat_name:
+            seat_map[seat_name] = seat_stocks
 
     return {
         "data_date": data_date,
@@ -194,10 +236,18 @@ def analyze_ladder(snapshot: dict) -> dict:
         "total_zt": ladder.get("total_limit_up", 0),
         "shenwei_dragon": shenwei_dragon,
         "sector_dragons": sector_dragons,
-        "levels": levels,
-        "theme_leaders": theme_leaders,
+        "levels_data": levels_data,
+        "lb_rates": lb_rates,
+        "concept_counts": concept_counts,
+        "stock_themes_map": stock_themes_map,
+        "theme_stock_codes": theme_stock_codes,
+        "hotmoney_top_buy": hotmoney_top_buy,
+        "seat_map": seat_map,
         "theme_stats": [
-            {"name": t["name"], "zt_count": t["limitup_count"], "net_yi": t.get("net_yi", 0)}
+            {"name": t["name"], "zt_count": t["limitup_count"],
+             "net_yi": t.get("net_yi", 0),
+             "top_stocks": t.get("top_stocks", []),
+             "stocks": t.get("stocks", [])}
             for t in themes[:10]
         ],
     }
@@ -207,48 +257,54 @@ def analyze_ladder(snapshot: dict) -> dict:
 # 3. PROMOTION PREDICTION ENGINE
 # ====================================================================
 
-def predict_promotion(zt_pool: list, snapshot: dict) -> List[Dict]:
-    """从涨停板中筛选晋级概率最高的标的"""
-    ladder = snapshot.get("ladder", {})
+def predict_promotion(zt_pool: list, snapshot: dict, ladder_data: dict) -> List[Dict]:
+    """从涨停板中筛选晋级概率最高的标的 — 多源交叉验证"""
     themes = snapshot.get("hot_themes", [])
+    hotmoney = snapshot.get("hotmoney", {})
     mkt = snapshot.get("market", {})
 
-    boards_map = ladder.get("boards", {})
-    # Flatten all ladder stocks for quick lookup
-    ladder_stocks = {}
-    for k, v in boards_map.items():
-        if isinstance(v, list):
-            for s in v:
-                code = str(s.get("code", "")).strip()
-                if code:
-                    ladder_stocks[code] = {**s, "board_level": k}
+    # Theme matching maps (already cleaned in analyze_ladder)
+    stock_themes_map = ladder_data.get("stock_themes_map", {})
 
-    # Theme stock sets
-    theme_stock_sets = {}
+    # Hot money data
+    hotmoney_buy_names = {s.get("name", "") for s in hotmoney.get("top_net_buy", [])}
+    seat_stock_names = set()
+    for seat in hotmoney.get("seats", []):
+        for s in seat.get("stocks", []):
+            seat_stock_names.add(s.get("name", ""))
+
+    # All theme stocks with codes for matching
+    theme_code_map = {}  # clean_code → theme_name
     for t in themes:
-        t_name = t["name"]
-        stocks = set()
-        if "stocks" in t:
-            for s in t["stocks"]:
-                stocks.add(str(s.get("code", "")).strip())
-        theme_stock_sets[t_name] = {"count": t.get("limitup_count", 0), "stocks": stocks}
+        for s in t.get("stocks", []):
+            raw = s.get("code", "")
+            clean = raw.replace(".SZ","").replace(".SH","").replace(".BJ","")
+            if clean and clean not in theme_code_map:
+                theme_code_map[clean] = t["name"]
 
     candidates = []
     for row in zt_pool:
         code = str(row.get("代码", "")).strip()
         name = str(row.get("名称", "")).strip()
-        if not code:
+        if not code or not name:
             continue
 
         # Basic data
         change = parse_float(row.get("涨跌幅", 0))
         turnover = parse_float(row.get("换手率", 0))
-        amount = parse_float(row.get("成交额", 0))
-        seal_amt = parse_float(row.get("封板资金", 0))
-        float_mv = parse_float(row.get("流通市值", 0))
+        amount = parse_float(row.get("成交额", 0))      # 元
+        seal_amt = parse_float(row.get("封板资金", 0))   # 元
+        float_mv = parse_float(row.get("流通市值", 0))   # 元
         first_seal = str(row.get("首次封板时间", "")).strip()
         break_n = int(parse_float(row.get("炸板次数", 0)))
         streak_raw = str(row.get("涨停统计", "")).strip()
+
+        # Market cap in 亿
+        float_mv_yi = float_mv / 1e8
+        # Amount in 亿
+        amount_yi = amount / 1e8
+        # Seal amount in 亿
+        seal_yi = seal_amt / 1e8
 
         # Streak count
         streak_n = 1
@@ -262,19 +318,29 @@ def predict_promotion(zt_pool: list, snapshot: dict) -> List[Dict]:
         if streak_n < 2:
             continue
 
+        # ---- Matched themes (verified cross-source) ----
+        matched_themes = stock_themes_map.get(code, [])
+        # Also try matching by name from theme stock lists
+        if not matched_themes:
+            for t in themes:
+                for s in t.get("stocks", []):
+                    if s.get("name", "") == name:
+                        matched_themes.append(t["name"])
+        matched_themes = list(dict.fromkeys(matched_themes))  # dedup
+
         # ---- Score dimensions ----
         scores = {}
 
-        # A. 板块支撑 (0-25)
+        # A. 板块支撑 (0-25) - verified against hhxg theme data
         theme_score = 0
-        matched_themes = []
-        for t_name, t_data in theme_stock_sets.items():
-            if code in t_data["stocks"] or name in str(t_data.get("stocks", "")):
-                matched_themes.append(t_name)
-                theme_score = max(theme_score, min(t_data["count"] * 2, 20) + 5)
-        if not matched_themes:
-            theme_score = 5  # 无板块支撑
-        scores["板块支撑"] = min(theme_score, 25)
+        if matched_themes:
+            # Find max limitup count among matched themes
+            max_zt = max([
+                t.get("limitup_count", 0) for t in themes
+                if t["name"] in matched_themes
+            ] or [0])
+            theme_score = 5 + min(max_zt * 0.6, 20)
+        scores["板块支撑"] = round(min(theme_score, 25), 1)
 
         # B. 封板质量 (0-25)
         seal_score = 0
@@ -296,49 +362,46 @@ def predict_promotion(zt_pool: list, snapshot: dict) -> List[Dict]:
         if break_n == 0:           seal_score += 5
         elif break_n <= 2:         seal_score += 2
         else:                      seal_score -= 5
-        scores["封板质量"] = max(0, min(seal_score, 25))
+        scores["封板质量"] = round(max(0, min(seal_score, 25)), 1)
 
         # C. 筹码健康度 (0-20)
-        chip_score = 10  # base
+        chip_score = 10
         if 3 <= turnover <= 15:    chip_score += 6
         elif 15 < turnover <= 25:  chip_score += 3
         elif turnover > 25:        chip_score -= 3
-        if float_mv < 50:          chip_score += 4
-        elif float_mv < 100:       chip_score += 2
-        scores["筹码健康度"] = max(0, min(chip_score, 20))
+        if float_mv_yi < 50:       chip_score += 4
+        elif float_mv_yi < 100:    chip_score += 2
+        scores["筹码健康度"] = round(max(0, min(chip_score, 20)), 1)
 
-        # D. 辨识度/梯队地位 (0-15)
+        # D. 辨识度/梯队 (0-15)
         id_score = 0
         if streak_n >= 3:          id_score += 8
         elif streak_n >= 2:        id_score += 4
         if matched_themes:         id_score += 4
-        # Check if it's sector dragon
+        # Check if sector dragon
         for t in themes:
             tops = t.get("top_stocks", [])
             if tops and tops[0].get("name", "") == name:
                 id_score += 3
                 break
-        scores["辨识度/梯队"] = min(id_score, 15)
+        scores["辨识度/梯队"] = round(min(id_score, 15), 1)
 
-        # E. 资金/龙虎榜 (0-15)
-        fund_score = 5  # base
-        ls = ladder_stocks.get(code, {})
-        hotmoney = ls.get("hotmoney", "")
-        if "机构" in str(hotmoney):
-            fund_score += 5
-        elif "知名" in str(hotmoney) or "游资" in str(hotmoney):
-            fund_score += 3
-        # Check theme net inflow
+        # E. 资金/龙虎榜 (0-15) - verified against hhxg hotmoney data
+        fund_score = 5
+        if name in hotmoney_buy_names:
+            fund_score += 5  # 机构/游资净买入TOP
+        if name in seat_stock_names:
+            fund_score += 3  # 知名游资席位参与
         for t in themes:
             if t.get("name", "") in matched_themes:
                 net_yi = t.get("net_yi", 0)
-                if net_yi > 5:      fund_score += 5
-                elif net_yi > 0:    fund_score += 2
+                if net_yi > 10:      fund_score += 5
+                elif net_yi > 0:     fund_score += 2
                 break
-        scores["资金/龙虎榜"] = max(0, min(fund_score, 15))
+        scores["资金/龙虎榜"] = round(max(0, min(fund_score, 15)), 1)
 
         # ---- Total ----
-        total = sum(scores.values())  # max = 100
+        total = sum(scores.values())
 
         # ---- Intervention method ----
         if streak_n >= 3 and scores["封板质量"] >= 20:
@@ -360,27 +423,31 @@ def predict_promotion(zt_pool: list, snapshot: dict) -> List[Dict]:
         else:
             auction = f"竞价高开+2%~+5%, 竞价量>昨日8%"
 
+        # ---- Is sector dragon or shenwei ----
+        is_sector_dragon = any(
+            t.get("top_stocks", [{}])[0].get("name", "") == name
+            for t in themes
+        )
+        is_shenwei = name == ladder_data.get("shenwei_dragon", {}).get("name", "")
+
         candidates.append({
             "code": code, "name": name,
             "streak": streak_n,
             "first_seal": first_seal,
-            "turnover": turnover,
-            "amount": amount,
-            "seal_amt": seal_amt,
-            "float_mv": float_mv,
+            "turnover": round(turnover, 1),
+            "amount_yi": round(amount_yi, 2),
+            "seal_yi": round(seal_yi, 2),
+            "float_mv_yi": round(float_mv_yi, 0),
             "break_n": break_n,
             "themes": matched_themes,
             "scores": scores,
             "total_score": round(total, 1),
-            "promo_prob": round(total, 1),  # 0-100
+            "promo_prob": round(total, 1),
             "method": method,
             "stop_loss": stop_loss,
             "auction": auction,
-            "is_sector_dragon": any(
-                t.get("top_stocks", [{}])[0].get("name", "") == name
-                for t in themes
-            ),
-            "is_shenwei": name == ladder.get("top_streak", {}).get("name", ""),
+            "is_sector_dragon": is_sector_dragon,
+            "is_shenwei": is_shenwei,
         })
 
     candidates.sort(key=lambda x: x["total_score"], reverse=True)
@@ -414,7 +481,7 @@ def llm_deep_analysis(
         cand_lines.append(
             f"{i+1}. {role} {c['name']}({c['code']}) | "
             f"{c['streak']}连板 | 封{c['first_seal']} | 换手{c['turnover']:.1f}% | "
-            f"封单{(c['seal_amt']/1e4):.2f}亿 | 板块:{themes_str} | "
+            f"封单{c['seal_yi']:.2f}亿 | 板块:{themes_str} | "
             f"晋级概率:{c['promo_prob']:.0f}% | 介入:{c['method']} | {scores_str}"
         )
 
@@ -503,7 +570,7 @@ def build_report(
         f"📈 赚钱效应: {sentiment['sentiment']:.0f}/100 | 涨停{sentiment.get('limit_up',0)}家 | 跌停{sentiment.get('limit_down',0)}家",
         f"💥 炸板率: {sentiment['fry_rate']:.1f}% | 连板晋级率: {sentiment['promo_rate']:.0f}%",
         f"🏔️ 最高连板: {sentiment['max_streak']}板",
-        f"🛡️ 仓位安全: {sentiment['safety']} | 建议仓位: {sentiment['position']}",
+        f"🛡️ 仓位安全: {sentiment['safety']}",
         f"",
         f"💬 环境解读: {sentiment['cycle_detail']}",
         "",
@@ -511,39 +578,57 @@ def build_report(
 
     # ---- Ladder ----
     sd = ladder_data.get("shenwei_dragon", {})
-    levels = ladder_data.get("levels", {})
+    levels_data = ladder_data.get("levels_data", {})
 
     lines.append("🪜 连板梯队梳理")
     if sd and sd.get("name"):
-        lines.append(f"👑 身位龙: {sd.get('name','')} ({sd.get('boards','?')}连板 | {sd.get('industry','')})")
+        lines.append(f"👑 身位龙: {sd.get('name','')} ({sd.get('boards',0)}连板 | {sd.get('industry','')})")
 
-    # Theme leaders
+    # Theme leaders with accurate data
     for ts in ladder_data.get("theme_stats", [])[:8]:
-        name = ts["name"]
-        zt_n = ts["zt_count"]
-        net = ts.get("net_yi", 0)
-        direction = "流入" if net > 0 else "流出"
-        lines.append(f"🏆 {name}: {zt_n}只涨停 | 资金净{direction}{abs(net):.1f}亿")
+        lines.append(f"🏆 {ts['name']}: {ts['zt_count']}只涨停 | 净流入{ts['net_yi']:+.1f}亿 | 龙一: {ts['top_stocks'][0]['name'] if ts.get('top_stocks') else '—'}")
 
-    # Ladder
-    if levels:
+    # Ladder levels with success/fail rates
+    if levels_data:
         lines.append(f"")
-        for lv in sorted(levels.keys(), key=lambda x: int(x) if x.isdigit() else 99):
-            stocks = levels[lv]
-            names = [f"{s.get('name','')}({s.get('code','')})" for s in stocks[:10]]
-            suffix = f" ...+{len(stocks)-10}" if len(stocks) > 10 else ""
-            label = f"{lv}板" if lv != "1" else "首板"
-            lines.append(f"📋 {label} ({len(stocks)}家): {', '.join(names)}{suffix}")
+        for lv_key in sorted(levels_data.keys(), key=lambda x: int(x)):
+            lv = levels_data[lv_key]
+            suc = lv["success_count"]
+            fail = lv["fail_count"]
+            total_attempts = suc + fail
+            # Compute晋级率 from actual data (verifiable)
+            next_lv_key = str(int(lv_key) + 1)
+            next_lv = levels_data.get(next_lv_key, {})
+            from_next = next_lv.get("total", 0)
+            # 晋级率 = 该梯队成功晋级到下一梯队的数量 / 该梯队总尝试数
+            if total_attempts > 0:
+                calc_rate = f"{suc/total_attempts*100:.0f}%"
+            else:
+                calc_rate = "—"
+            label = f"{lv_key}板" if lv_key != "1" else "首板"
+
+            # Show success stocks
+            success_names = [f"{s.get('name','')}({s.get('code','').replace('.SZ','').replace('.SH','')})" for s in lv["success"][:8]]
+            success_str = ", ".join(success_names) if success_names else "无"
+            lines.append(f"📋 {label}: {suc}成功/{fail}失败 (晋级率{calc_rate}) | 晋级: {success_str}")
+
     lines.append("")
+
+    # ---- Hot money reference ----
+    hotmoney_buy = ladder_data.get("hotmoney_top_buy", [])
+    if hotmoney_buy:
+        names = [f"{s.get('name','')}({s.get('net_yi',0):+.1f}亿)" for s in hotmoney_buy[:5]]
+        lines.append(f"💰 龙虎榜净买TOP5: {', '.join(names)}")
+        lines.append("")
 
     # ---- LLM Analysis ----
     if llm_text:
         # Clean up LLM output (remove ## headers, make it plain text)
         cleaned = llm_text
-        # Remove markdown headers
-        cleaned = cleaned.replace("## ", "🔹 ").replace("### ", "▪ ")
-        # Remove bold markers
+        cleaned = cleaned.replace("## ", "").replace("### ", "")
+        # Remove bold markers and horizontal rules
         cleaned = cleaned.replace("**", "")
+        cleaned = cleaned.replace("---", "")
         lines.append("🧠 AI综合研判")
         lines.append(cleaned)
         lines.append("")
@@ -677,11 +762,12 @@ def main():
     # 3. Ladder
     print("      梯队梳理...", end=" ")
     ladder_data = analyze_ladder(snapshot)
-    print(f"最高{ladder_data['max_streak']}板, {len(ladder_data.get('levels',{}))}级梯队")
+    lv_count = len(ladder_data.get('levels_data', {}))
+    print(f"最高{ladder_data['max_streak']}板, {lv_count}级梯队")
 
     # 4. Promotion prediction
     print("[3/4] 晋级预测...", end=" ")
-    candidates = predict_promotion(zt_pool, snapshot)
+    candidates = predict_promotion(zt_pool, snapshot, ladder_data)
     high_n = sum(1 for c in candidates if c["promo_prob"] >= 55)
     mid_n = sum(1 for c in candidates if 40 <= c["promo_prob"] < 55)
     print(f"{len(candidates)}只连板股 | 高概率:{high_n} 中等:{mid_n}")
