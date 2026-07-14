@@ -624,7 +624,7 @@ def build_report(
             "",
             f"| 维度 | 详情 |",
             f"|------|------|",
-            f"| 连板/封板 | {c['streak']}连板，首封{c['first_seal']}，{'未开板' if c['break_n']==0 else f'开板{c[\"break_n\"]}次'} |",
+            f"| 连板/封板 | {c['streak']}连板，首封{c['first_seal']}，{'未开板' if c['break_n']==0 else '开板' + str(c['break_n']) + '次'} |",
             f"| 换手/量能 | 换手{c['turnover']:.1f}%，{'✅健康' if 3<=c['turnover']<=15 else '⚠️关注'} |",
             f"| **板块支撑** | {themes_str} — 得分{s['板块支撑']}/25 |",
             f"| **封板质量** | 得分{s['封板质量']}/25 —— {'封单强劲，早盘秒封' if s['封板质量']>=20 else '封板质量中等' if s['封板质量']>=12 else '封板偏弱，谨慎'} |",
