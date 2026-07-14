@@ -1,0 +1,71 @@
+name: 短线接力分析
+
+on:
+  schedule:
+    - cron: "0 10 * * 1-5"
+  workflow_dispatch:
+
+concurrency:
+  group: relay-scanner
+  cancel-in-progress: false
+
+jobs:
+  scan:
+    runs-on: ubuntu-latest
+    environment: STOCK_LIST
+    timeout-minutes: 15
+
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v5
+
+      - name: 设置 Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.11"
+          cache: "pip"
+
+      - name: 安装依赖
+        run: |
+          pip install --upgrade pip
+          pip install akshare pandas python-dotenv requests
+
+      - name: 执行接力分析
+        env:
+          ANSPIRE_API_KEYS: ${{ secrets.ANSPIRE_API_KEYS }}
+          EMAIL_SENDER: ${{ secrets.EMAIL_SENDER }}
+          EMAIL_PASSWORD: ${{ secrets.EMAIL_PASSWORD }}
+          EMAIL_RECEIVERS: ${{ secrets.EMAIL_RECEIVERS }}
+        run: |
+          python scripts/relay_scanner.py -o reports/relay_analysis.md
+          
+      - name: 发送邮件
+        env:
+          EMAIL_SENDER: ${{ secrets.EMAIL_SENDER }}
+          EMAIL_PASSWORD: ${{ secrets.EMAIL_PASSWORD }}
+          EMAIL_RECEIVERS: ${{ secrets.EMAIL_RECEIVERS }}
+        run: |
+          python3 -c "
+          import smtplib, os
+          from email.mime.text import MIMEText
+          report = open('reports/relay_analysis.md', encoding='utf-8').read()
+          sender = os.environ['EMAIL_SENDER']
+          pwd = os.environ['EMAIL_PASSWORD']
+          to = os.environ.get('EMAIL_RECEIVERS', sender)
+          msg = MIMEText(report, 'plain', 'utf-8')
+          msg['Subject'] = '🎯 短线接力分析 - 2026-07-14'
+          msg['From'] = sender; msg['To'] = to
+          s = smtplib.SMTP_SSL('smtp.qq.com', 465, timeout=30)
+          s.login(sender, pwd)
+          s.sendmail(sender, to.split(','), msg.as_string())
+          s.quit()
+          print('✅ 邮件已发送')
+          "
+
+      - name: 上传报告
+        uses: actions/upload-artifact@v6
+        if: always()
+        with:
+          name: relay-analysis
+          path: reports/relay_analysis.md
+          retention-days: 30
