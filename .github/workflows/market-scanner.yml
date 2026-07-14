@@ -2,7 +2,7 @@ name: 市场深度扫描
 
 on:
   schedule:
-    - cron: "0 8 * * 1-5"
+    - cron: "45 7 * * 1-5"
   workflow_dispatch:
     inputs:
       skip_llm:
