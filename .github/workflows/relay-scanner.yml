@@ -44,25 +44,8 @@ jobs:
           EMAIL_SENDER: ${{ secrets.EMAIL_SENDER }}
           EMAIL_PASSWORD: ${{ secrets.EMAIL_PASSWORD }}
           EMAIL_RECEIVERS: ${{ secrets.EMAIL_RECEIVERS }}
-        run: |
-          python3 -c "
-          import smtplib, os
-          from email.mime.text import MIMEText
-          report = open('reports/relay_analysis.md', encoding='utf-8').read()
-          sender = os.environ['EMAIL_SENDER']
-          pwd = os.environ['EMAIL_PASSWORD']
-          to = os.environ.get('EMAIL_RECEIVERS', sender)
-          msg = MIMEText(report, 'plain', 'utf-8')
-          msg['Subject'] = '🎯 短线接力分析 - 2026-07-14'
-          msg['From'] = sender; msg['To'] = to
-          s = smtplib.SMTP_SSL('smtp.qq.com', 465, timeout=30)
-          s.login(sender, pwd)
-          s.sendmail(sender, to.split(','), msg.as_string())
-          s.quit()
-          print('✅ 邮件已发送')
-          "
+        run: python scripts/send_email.py
 
-      - name: 上传报告
         uses: actions/upload-artifact@v6
         if: always()
         with:
