@@ -2,7 +2,7 @@ name: 短线接力分析
 
 on:
   schedule:
-    - cron: "0 10 * * 1-5"
+    - cron: "45 7 * * 1-5"
   workflow_dispatch:
 
 concurrency:
